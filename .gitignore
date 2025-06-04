@@ -192,3 +192,11 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Sample files
+*.xlsx
+*.csv
+*.txt
+
+# vsCode workspace settings
+.vscode/
