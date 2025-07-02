@@ -532,11 +532,8 @@ class Ui_MainWindow(object):
                 results = []
                 total_materials = defaultdict(lambda: {"volume": 0.0, "price_subtotal": 0.0})
                 ws = sheet_dict[sheet_name]
-                debug = "5. Buang tanah bekas galian pondasi"
                 for row in range(2, ws.max_row + 1):
                     name = ws.cell(row=row, column=2).value
-                    if debug in str(name):
-                        print(f"Debugging row {row} in {sheet_name}: {name}")
                     volume = self.resolve_formula_v2(sheet_dict, sheet_name, row - 1, 2)
                     price = self.resolve_formula_v2(sheet_dict, sheet_name, row - 1, 4)
                     formula = self.resolve_formula_v2(sheet_dict, sheet_name, row - 1, 4, exclude_sheets=[self.analisaSheetComboBox.currentText(), self.analisaBetonSheetComboBox.currentText()])
