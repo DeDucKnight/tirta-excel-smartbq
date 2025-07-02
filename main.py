@@ -109,31 +109,44 @@ class Ui_MainWindow(object):
         except Exception as e:
             return 0.0
 
-    def preprocess_beton_ws(self, ws):
-        def resolve(cell_row, visited=None):
+    def preprocess_ws(self, ws):
+        def resolve(cell_row, col_index, visited=None):
             if visited is None:
                 visited = set()
-            if cell_row in visited:
-                return ws.cell(row=cell_row, column=5).value  # break loop
-            visited.add(cell_row)
+            key = (cell_row, col_index)
+            if key in visited:
+                return ws.cell(row=cell_row, column=col_index).value  # prevent infinite loop
+            visited.add(key)
 
-            val = ws.cell(row=cell_row, column=5).value
+            val = ws.cell(row=cell_row, column=col_index).value
             if not isinstance(val, str) or not val.startswith('='):
                 return val
 
             ref = val.lstrip('=').strip()
-            m = re.match(r"E(\d+)$", ref, re.IGNORECASE)
+
+            # Local cell reference like E10 or D7
+            m = re.match(r"([A-Z]+)(\d+)$", ref, re.IGNORECASE)
             if m:
-                next_row = int(m.group(1))
-                resolved = resolve(next_row, visited)
-                return resolved
-            return val
+                target_row, target_col = self.ref_to_idx(ref)
+                if target_row is not None:
+                    return resolve(target_row + 1, target_col + 1, visited)
+
+            # Arithmetic expression like =1*0.6
+            if re.fullmatch(r"[0-9.*+/() \\t-]+", ref):
+                try:
+                    return eval(ref)
+                except:
+                    return val
+
+            # Cross-sheet or unsupported formula → return as-is
+            return "=" + ref
 
         for row in range(2, ws.max_row + 1):
-            formula = ws.cell(row=row, column=5).value
-            if isinstance(formula, str) and formula.startswith('=E'):
-                final = resolve(row)
-                ws.cell(row=row, column=5).value = final
+            for col in [4, 5]:
+                formula = ws.cell(row=row, column=col).value
+                if isinstance(formula, str) and formula.startswith('='):
+                    final = resolve(row, col)
+                    ws.cell(row=row, column=col).value = final
 
     def resolve_formula(self, sheet_dict, sheet_name, row, col, visited=None):
         if visited is None:
@@ -327,14 +340,17 @@ class Ui_MainWindow(object):
         if re.fullmatch(r"[A-Za-z0-9\.\+\-\*/\(\) \t]+", ref):
             try:
                 tokens = re.findall(r"\b([A-Za-z]+[0-9]+)\b", ref)
+                resolved_ref = ref
                 for token in set(tokens):
                     r, c = self.ref_to_idx(token)
                     resolved = self.resolve_formula_v2(sheet_dict, sheet_name, r, c, visited.copy(), stop_on_cross_sheet, exclude_sheets)
                     if isinstance(resolved, (int, float)):
                         resolved_ref = re.sub(rf"\b{token}\b", str(resolved), resolved_ref)
+                    elif isinstance(resolved, str):
+                        resolved_ref = re.sub(rf"\b{token}\b", f'"{resolved}"', resolved_ref)
                     else:
-                        return resolved  # abort eval if cross-ref or unresolved
-                return eval(ref)
+                        return resolved
+                return eval(resolved_ref)
             except:
                 return 0.0
 
@@ -401,12 +417,16 @@ class Ui_MainWindow(object):
                 clean_coef = self.calculate_formula(coef)
                 price = self.resolve_formula_v2(sheet_dict, sheet, i, 4) if sheet_dict else 0.0
 
+                # Price Subtotal
+                price_subtotal = clean_coef * price
+
                 # Append the beton material itself
                 result.append({
                     "name": name,
                     "unit": unit,
                     "volume": clean_coef * multiplier,
                     "price": price,
+                    "price_subtotal": price_subtotal,
                     "row": i
                 })
 
@@ -496,6 +516,10 @@ class Ui_MainWindow(object):
             analisa_ws = wb[analisa_name]
             beton_ws = wb[beton_name]
 
+            # Preprocess Analisa and Beton sheets
+            self.preprocess_ws(analisa_ws)
+            self.preprocess_ws(beton_ws)
+
             target_sheet_names = [item.text() for item in self.targetListWidget.selectedItems()]
             sheet_dict = {name: wb[name] for name in target_sheet_names}
             sheet_dict[analisa_name] = analisa_ws
@@ -506,10 +530,13 @@ class Ui_MainWindow(object):
 
             for sheet_name in target_sheet_names:
                 results = []
-                total_materials = defaultdict(float)
+                total_materials = defaultdict(lambda: {"volume": 0.0, "price_subtotal": 0.0})
                 ws = sheet_dict[sheet_name]
+                debug = "5. Buang tanah bekas galian pondasi"
                 for row in range(2, ws.max_row + 1):
                     name = ws.cell(row=row, column=2).value
+                    if debug in str(name):
+                        print(f"Debugging row {row} in {sheet_name}: {name}")
                     volume = self.resolve_formula_v2(sheet_dict, sheet_name, row - 1, 2)
                     price = self.resolve_formula_v2(sheet_dict, sheet_name, row - 1, 4)
                     formula = self.resolve_formula_v2(sheet_dict, sheet_name, row - 1, 4, exclude_sheets=[self.analisaSheetComboBox.currentText(), self.analisaBetonSheetComboBox.currentText()])
@@ -519,7 +546,7 @@ class Ui_MainWindow(object):
                     except:
                         continue
 
-                    results.append({"item": name, "material": "", "volume": volume, "formula": formula})
+                    results.append({"item": name, "material": "", "volume": volume, "formula": formula, "price": price, "unit": ws.cell(row=row, column=4).value})
 
                     if not isinstance(formula, str) or not formula.startswith("="):
                         continue
@@ -552,7 +579,9 @@ class Ui_MainWindow(object):
                                     "unit": item.get("unit", ""),
                                     "price": item.get("price", 0.0)
                                 })
-                            total_materials[item['name']] += item['volume']
+                            price_subtotal = item["volume"] * item.get("price", 0.0)
+                            total_materials[item["name"]]["volume"] += item["volume"]
+                            total_materials[item["name"]]["price_subtotal"] += price_subtotal
                     elif sheet.lower() == beton_name.lower(): # Beton Sheet
                         sub_items = self.extract_volume_rows_from_ws(
                             sheet_dict[sheet],
@@ -571,11 +600,12 @@ class Ui_MainWindow(object):
                                     "volume": item["volume"],
                                     "formula": "",
                                     "unit": item.get("unit", ""),
-                                    "price": item.get("price", 0.0)
+                                    "price": item.get("price", 0.0),
+                                    "price_subtotal": item.get("price_subtotal", 0.0)
                                 })
-                                
-                                total_materials[item["name"]] += item["volume"]
-                            
+                                price_subtotal = item["volume"] * item.get("price", 0.0)
+                                total_materials[item["name"]]["volume"] += item["volume"]
+                                total_materials[item["name"]]["price_subtotal"] += price_subtotal
                             # If it's a deeper Analisa item already extracted
                             else:
                                 results.append({
@@ -584,10 +614,13 @@ class Ui_MainWindow(object):
                                     "volume": item["volume"],
                                     "formula": "",
                                     "unit": item.get("unit", ""),
-                                    "price": item.get("price", 0.0)
+                                    "price": item.get("price", 0.0),
+                                    "price_subtotal": item.get("price_subtotal", 0.0)
                                 })
-                                
-                                total_materials[item["name"]] += item["volume"]
+                                price_subtotal = item["volume"] * item.get("price", 0.0)
+                                total_materials[item["name"]]["volume"] += item["volume"]
+                                total_materials[item["name"]]["price_subtotal"] += price_subtotal
+                
                 all_results[sheet_name] = results
                 all_total_materials[sheet_name] = total_materials
             
@@ -618,11 +651,13 @@ class Ui_MainWindow(object):
             # Total Material Sheet
             for sheet_name, total_materials in all_total_materials.items():
                 ws_total = wb_out.create_sheet(title=f"Total - {sheet_name[:28]}")
-                ws_total.append(["Materials", "Total Volume"])
+                ws_total.append(["Materials", "Total Volume", "Total Price"])
                 ws_total.column_dimensions['A'].width = 90
 
                 for name, total in total_materials.items():
-                    ws_total.append([name, round(total, 4)])
+                    volume = total["volume"]
+                    subtotal = total["price_subtotal"]
+                    ws_total.append([name, round(volume, 4), round(subtotal, 4)])
 
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")
             default = os.path.join(desktop, "FormattedOutput.xlsx")
